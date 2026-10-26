@@ -8,6 +8,11 @@ from __future__ import annotations
 
 __version__ = "1.0.0"
 
+from sanitize_guard.media_scrubber import (
+    MediaScrubber,
+    MetadataChunkInfo,
+    ScrubResult,
+)
 from sanitize_guard.pii_engine import (
     GENERIC_HOSTNAMES,
     GENERIC_USER_PLACEHOLDERS,
@@ -31,4 +36,7 @@ __all__ = [
     "RFC3849_NETWORK",
     "GENERIC_USER_PLACEHOLDERS",
     "GENERIC_HOSTNAMES",
+    "MediaScrubber",
+    "MetadataChunkInfo",
+    "ScrubResult",
 ]
