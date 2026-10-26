@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sanitize-guard"
+version = "1.0.0"
+description = "Zero-dependency PII & filesystem leak detector, pure-Python media metadata chunk scrubber, dotfile redactor, and git forensic auditor."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "1MEshh", email = "152591660+1MEshh@users.noreply.github.com"}
+]
+keywords = ["privacy", "sanitization", "pii-detector", "media-scrubber", "exif-stripper", "dotfiles", "sarif"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.scripts]
+sanitize-guard = "sanitize_guard.cli:main"
+sanitize = "sanitize_guard.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sanitize_guard*"]
+
+[project.urls]
+Homepage = "https://github.com/1MEshh/Sanitize"
+Repository = "https://github.com/1MEshh/Sanitize"
