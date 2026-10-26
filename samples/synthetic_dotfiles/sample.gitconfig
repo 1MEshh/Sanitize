@@ -1,0 +1,25 @@
+# ==============================================================================
+# Synthetic Git Configuration (Unsanitized Fixture for Sanitize Guard)
+# Contains personal identity, un-sanitized email, and private key references.
+# ==============================================================================
+
+[user]
+	name = Jane Doe
+	email = jane.doe@personalmail.org
+	signingkey = 3AA5C34371567BD2
+
+[core]
+	editor = nvim
+	excludesfile = /home/synthuser/.gitignore_global
+
+[commit]
+	gpgsign = true
+
+[init]
+	defaultBranch = main
+
+[alias]
+	st = status -sb
+	co = checkout
+	br = branch
+	lg = log --oneline --graph --decorate

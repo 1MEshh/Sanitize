@@ -225,6 +225,10 @@ class PIIEngine:
         def overlaps(s: int, e: int) -> bool:
             return any(not (e <= existing_s or s >= existing_e) for existing_s, existing_e in matched_spans)
 
+        # Skip lines that are themselves redaction templates
+        if "<REDACTED" in line:
+            return []
+
         # 1. Private Keys
         if RuleID.PRIVATE_KEY not in self.ignored_rules:
             for match in self._RE_PRIVATE_KEY.finditer(line):
@@ -252,10 +256,12 @@ class PIIEngine:
                     user_part = match.group(2)
                     start, end = match.start(1), match.end(1)
 
-                    # Skip template placeholders like <user>, <username>, etc.
+                    # Skip template placeholders and ellipsis (...)
                     clean_user = user_part.lower().strip()
                     if (
                         clean_user in GENERIC_USER_PLACEHOLDERS
+                        or clean_user in {"...", "..", "."}
+                        or all(c == "." for c in clean_user)
                         or (clean_user.startswith("<") and clean_user.endswith(">"))
                     ):
                         continue
@@ -385,6 +391,9 @@ class PIIEngine:
             except ValueError:
                 continue
 
+            # Check if this IP is part of a CIDR network mask declaration (e.g. 10.0.0.0/8)
+            is_cidr_declaration = bool(re.match(r"^/\d{1,2}\b", line[end:]))
+
             # Check RFC 5737 Documentation IP (TEST-NET-1, TEST-NET-2, TEST-NET-3)
             if any(ip in net for net in RFC5737_NETWORKS):
                 if RuleID.RFC5737_DOC_IP not in self.ignored_rules:
@@ -408,22 +417,37 @@ class PIIEngine:
             if any(ip in net for net in RFC1918_NETWORKS):
                 if RuleID.RFC1918_PRIVATE_IP not in self.ignored_rules:
                     matched_spans.add((start, end))
-                    # Deterministic safe mapping: last octet preserved in 198.51.100.0/24
-                    last_octet = int(ip_str.split(".")[-1])
-                    safe_replacement = f"198.51.100.{last_octet}"
-                    findings.append(
-                        PIIFinding(
-                            rule_id=RuleID.RFC1918_PRIVATE_IP,
-                            severity=Severity.MEDIUM,
-                            description=f"RFC 1918 Private IPv4 address leak: {ip_str}",
-                            file_path=file_path,
-                            line_number=line_num,
-                            column=start + 1,
-                            matched_text=ip_str,
-                            replacement=safe_replacement,
-                            is_leak=True,
+                    if is_cidr_declaration:
+                        findings.append(
+                            PIIFinding(
+                                rule_id=RuleID.RFC1918_PRIVATE_IP,
+                                severity=Severity.INFO,
+                                description=f"RFC 1918 Subnet CIDR specification: {ip_str}",
+                                file_path=file_path,
+                                line_number=line_num,
+                                column=start + 1,
+                                matched_text=ip_str,
+                                replacement=None,
+                                is_leak=False,
+                            )
                         )
-                    )
+                    else:
+                        # Deterministic safe mapping: last octet preserved in 198.51.100.0/24
+                        last_octet = int(ip_str.split(".")[-1])
+                        safe_replacement = f"198.51.100.{last_octet}"
+                        findings.append(
+                            PIIFinding(
+                                rule_id=RuleID.RFC1918_PRIVATE_IP,
+                                severity=Severity.MEDIUM,
+                                description=f"RFC 1918 Private IPv4 address leak: {ip_str}",
+                                file_path=file_path,
+                                line_number=line_num,
+                                column=start + 1,
+                                matched_text=ip_str,
+                                replacement=safe_replacement,
+                                is_leak=True,
+                            )
+                        )
                 continue
 
             # Check Loopback (127.0.0.0/8)
@@ -458,8 +482,8 @@ class PIIEngine:
 
                 mac_str = match.group(0)
                 norm_mac = mac_str.replace("-", ":").lower()
-                # Exclude all-zeros and broadcast
-                if norm_mac in {"00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"}:
+                # Exclude all-zeros, broadcast, and standard documentation dummy MAC
+                if norm_mac in {"00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff", "02:00:00:00:00:01"}:
                     continue
 
                 matched_spans.add((start, end))

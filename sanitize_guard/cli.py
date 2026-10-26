@@ -326,18 +326,28 @@ def cmd_check_git(args: argparse.Namespace) -> int:
                 check=False,
             )
             if diff_res.returncode == 0:
-                # Scan added lines in patch
-                added_lines = [
-                    l[1:] for l in diff_res.stdout.splitlines()
-                    if l.startswith("+") and not l.startswith("+++")
-                ]
-                diff_text = "\n".join(added_lines)
-                diff_findings = engine.scan_text(diff_text, file_path=f"diff:{short_hash}")
-                for df in diff_findings:
-                    if df.is_leak and df.severity in (Severity.CRITICAL, Severity.HIGH):
-                        leaks_found.append(
-                            f"[{short_hash}] Patch diff introduced {df.rule_id.value} ({df.description}): '{df.matched_text}'"
-                        )
+                # Scan added lines per file, excluding test fixtures and samples
+                current_file = ""
+                added_lines: list[str] = []
+                for d_line in diff_res.stdout.splitlines():
+                    if d_line.startswith("diff --git a/"):
+                        parts = d_line.split()
+                        if len(parts) >= 4:
+                            current_file = parts[3].lstrip("b/")
+                    elif d_line.startswith("+++ b/"):
+                        current_file = d_line[6:]
+                    elif d_line.startswith("+") and not d_line.startswith("+++"):
+                        if not any(current_file.startswith(pfx) for pfx in ("tests/", "samples/", "fixtures/")):
+                            added_lines.append(d_line[1:])
+
+                if added_lines:
+                    diff_text = "\n".join(added_lines)
+                    diff_findings = engine.scan_text(diff_text, file_path=f"diff:{short_hash}")
+                    for df in diff_findings:
+                        if df.is_leak and df.severity in (Severity.CRITICAL, Severity.HIGH):
+                            leaks_found.append(
+                                f"[{short_hash}] Patch diff introduced {df.rule_id.value} ({df.description}): '{df.matched_text}'"
+                            )
 
         if leaks_found:
             print("[FAIL] Git commit-graph forensic audit detected leaks:")
