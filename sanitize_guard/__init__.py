@@ -8,6 +8,11 @@ from __future__ import annotations
 
 __version__ = "1.0.0"
 
+from sanitize_guard.dotfile_redactor import (
+    DotfileRedactor,
+    RedactionChange,
+    RedactionResult,
+)
 from sanitize_guard.media_scrubber import (
     MediaScrubber,
     MetadataChunkInfo,
@@ -24,6 +29,10 @@ from sanitize_guard.pii_engine import (
     RuleID,
     Severity,
 )
+from sanitize_guard.sarif import (
+    ASCIITableExporter,
+    SARIFExporter,
+)
 
 __all__ = [
     "__version__",
@@ -39,4 +48,9 @@ __all__ = [
     "MediaScrubber",
     "MetadataChunkInfo",
     "ScrubResult",
+    "DotfileRedactor",
+    "RedactionChange",
+    "RedactionResult",
+    "SARIFExporter",
+    "ASCIITableExporter",
 ]
