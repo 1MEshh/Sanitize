@@ -378,7 +378,3 @@ bash scripts/security-audit.sh
 ```
 
 ---
-
-## License
-
-MIT License. Designed and maintained by `1MEshh <152591660+1MEshh@users.noreply.github.com>`.
