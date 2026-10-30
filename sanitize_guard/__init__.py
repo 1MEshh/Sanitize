@@ -6,7 +6,7 @@ dotfile template sanitization, and git commit-graph forensics.
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from sanitize_guard.dotfile_redactor import (
     DotfileRedactor,
@@ -14,6 +14,7 @@ from sanitize_guard.dotfile_redactor import (
     RedactionResult,
 )
 from sanitize_guard.media_scrubber import (
+    SUPPORTED_EXTENSIONS,
     MediaScrubber,
     MetadataChunkInfo,
     ScrubResult,
@@ -27,6 +28,7 @@ from sanitize_guard.pii_engine import (
     PIIEngine,
     PIIFinding,
     RuleID,
+    SanitizeIgnore,
     Severity,
 )
 from sanitize_guard.sarif import (
@@ -40,12 +42,14 @@ __all__ = [
     "RuleID",
     "PIIFinding",
     "PIIEngine",
+    "SanitizeIgnore",
     "RFC5737_NETWORKS",
     "RFC1918_NETWORKS",
     "RFC3849_NETWORK",
     "GENERIC_USER_PLACEHOLDERS",
     "GENERIC_HOSTNAMES",
     "MediaScrubber",
+    "SUPPORTED_EXTENSIONS",
     "MetadataChunkInfo",
     "ScrubResult",
     "DotfileRedactor",

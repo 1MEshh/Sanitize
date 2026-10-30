@@ -16,6 +16,8 @@
    - [2.2 JPEG Marker Parsing & Entropy Byte-Stuffing Invariants](#22-jpeg-marker-parsing--entropy-byte-stuffing-invariants)
    - [2.3 GIF 89a Comment Extension Sub-Block Dissection](#23-gif-89a-comment-extension-sub-block-dissection)
    - [2.4 Subnet Mask Algebra: RFC 1918 Private vs RFC 5737 Documentation Classification](#24-subnet-mask-algebra-rfc-1918-private-vs-rfc-5737-documentation-classification)
+   - [2.5 WebP RIFF FourCC Chunk Parsing & VP8X Extended Header Dissection](#25-webp-riff-fourcc-chunk-parsing--vp8x-extended-header-dissection)
+   - [2.6 ID3v2 Synchsafe Integer Decoding & Audio Metadata Scrubbing](#26-id3v2-synchsafe-integer-decoding--audio-metadata-scrubbing)
 3. [Detection Taxonomy & Rule Matrix](#3-detection-taxonomy--rule-matrix)
 4. [Dotfile Public Template Generation](#4-dotfile-public-template-generation)
 5. [Git Commit-Graph Forensics & Automated Hooks](#5-git-commit-graph-forensics--automated-hooks)
@@ -167,6 +169,34 @@ $$\mathbf{x}_{\text{sanitized}} = \langle 198, 51, 100, x_4 \rangle$$
 
 ---
 
+### 2.5 WebP RIFF FourCC Chunk Parsing & VP8X Extended Header Dissection
+
+WebP containers use the Resource Interchange File Format (RIFF). The file begins with `RIFF`, followed by a 32-bit little-endian total file size, and the `WEBP` form type. Chunks follow the 8-byte header structure: `[FourCC (4 bytes)][Size (4 bytes little-endian)][Payload][Padding byte if Size is odd]`.
+
+`MediaScrubber` parses the chunk sequence and removes privacy-invasive metadata blocks:
+- **`EXIF`**: Camera serial numbers, GPS latitude/longitude, timestamp tags, and thumbnail data.
+- **`XMP `**: Extensible Metadata Platform XML metadata containing software profiles, author identities, and edit history.
+
+When an extended `VP8X` header is present, `MediaScrubber` updates the 32-bit feature flags in-place:
+$$\text{Flags}_{\text{new}} = \text{Flags}_{\text{orig}} \land \neg (\mathtt{0x04} \lor \mathtt{0x08})$$
+clearing bit 2 (`Exif`) and bit 3 (`XMP`), while updating the top-level RIFF chunk size to reflect the excised payload.
+
+---
+
+### 2.6 ID3v2 Synchsafe Integer Decoding & Audio Metadata Scrubbing
+
+Audio files (MP3, WAV) frequently leak artist names, recording equipment signatures, workstation paths, and DAW software builds.
+
+#### ID3v2 Synchsafe Tag Stripping
+ID3v2 tags store their size across 4 bytes using 7-bit synchsafe integers (MSB of each byte is zero):
+$$\text{Size} = (b_0 \ll 21) \mid (b_1 \ll 14) \mid (b_2 \ll 7) \mid b_3$$
+`MediaScrubber` detects `ID3\x03\x00` and `ID3\x04\x00` headers at byte offset 0, computes the full tag size $\text{Total} = \text{Size} + 10$ bytes (including header and optional footer), and strips the entire block, leaving MPEG audio sync frames intact.
+
+#### RIFF / WAV INFO Chunk Stripping
+WAV files store metadata in `LIST` chunks of type `INFO` (containing `INAM`, `IART`, `ISFT`, `ICMT`). `MediaScrubber` walks the top-level RIFF chunk list, strips `LIST:INFO` and `id3 ` chunks, and adjusts the top-level RIFF container length accordingly.
+
+---
+
 ## 3. Detection Taxonomy & Rule Matrix
 
 | Rule ID | Rule Name | Target Artifact | Severity | Default Redaction Placeholder |
@@ -308,7 +338,7 @@ sanitize install-hook --hook pre-commit
       "tool": {
         "driver": {
           "name": "sanitize-guard",
-          "version": "1.0.0",
+          "version": "1.1.0",
           "informationUri": "https://github.com/1MEshh/Sanitize",
           "rules": [
             {
@@ -364,7 +394,7 @@ The repository enforces a strict zero-leak security gate executed via `scripts/s
 4. Zero active API credentials.
 5. Strict zero-emoji compliance.
 6. Git committer email privacy (`*@users.noreply.github.com`).
-7. 100% pass rate across the 22 automated unit tests.
+7. 100% pass rate across the 28 automated unit tests.
 8. Self-scan of `sanitize_guard` with 0 findings.
 
 ### Running Verification Locally

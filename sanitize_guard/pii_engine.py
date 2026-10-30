@@ -17,7 +17,7 @@ import ipaddress
 import os
 import re
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
@@ -125,6 +125,130 @@ GENERIC_HOSTNAMES = {
 }
 
 
+@dataclass
+class SanitizeIgnore:
+    """Parses and evaluates .sanitizeignore exclusion patterns and rule suppressions."""
+    patterns: list[str] = field(default_factory=list)
+    rule_suppressions: dict[str, set[str]] = field(default_factory=dict)
+    global_ignored_rules: set[str] = field(default_factory=set)
+
+    @classmethod
+    def parse(cls, content: str) -> "SanitizeIgnore":
+        """Parses .sanitizeignore content text."""
+        patterns: list[str] = []
+        rule_suppressions: dict[str, set[str]] = {}
+        global_ignored_rules: set[str] = set()
+
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            # Global rule suppression: ignore-rule:SAN-005 or sanitize:ignore=SAN-005
+            if line.startswith("ignore-rule:") or line.startswith("sanitize:ignore="):
+                rule_str = line.split(":", 1)[-1] if "ignore-rule:" in line else line.split("=", 1)[-1]
+                for r in rule_str.split(","):
+                    r = r.strip()
+                    if r:
+                        global_ignored_rules.add(r)
+                continue
+
+            # Path-specific rule suppression: <glob_pattern>:RULE_ID1,RULE_ID2
+            if ":" in line and not line.startswith(":"):
+                pat, rules_str = line.split(":", 1)
+                pat = pat.strip()
+                rules = {r.strip() for r in rules_str.split(",") if r.strip()}
+                if pat not in rule_suppressions:
+                    rule_suppressions[pat] = set()
+                rule_suppressions[pat].update(rules)
+                continue
+
+            # Standard glob pattern
+            patterns.append(line)
+
+        return cls(
+            patterns=patterns,
+            rule_suppressions=rule_suppressions,
+            global_ignored_rules=global_ignored_rules,
+        )
+
+    @classmethod
+    def load(cls, path_or_dir: str | Path = ".") -> "SanitizeIgnore":
+        """Loads .sanitizeignore from directory or file path if present."""
+        p = Path(path_or_dir)
+        if p.is_dir():
+            ignore_file = p / ".sanitizeignore"
+        else:
+            ignore_file = p
+
+        if ignore_file.is_file():
+            try:
+                return cls.parse(ignore_file.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                pass
+        return cls()
+
+    @classmethod
+    def from_file(cls, path_or_dir: str | Path) -> "SanitizeIgnore":
+        """Loads .sanitizeignore from a file or directory path."""
+        return cls.load(path_or_dir)
+
+    def is_file_ignored(self, file_path: str | Path) -> bool:
+        """Checks if a file path matches any exclusion glob or basename."""
+        import fnmatch
+
+        f_path = Path(file_path)
+        path_str = str(f_path).replace("\\", "/")
+        basename = f_path.name
+
+        for pat in self.patterns:
+            pat_clean = pat.rstrip("/")
+            if fnmatch.fnmatch(basename, pat_clean):
+                return True
+            if fnmatch.fnmatch(path_str, pat) or fnmatch.fnmatch(path_str, f"*/{pat}"):
+                return True
+            if path_str == pat_clean or path_str.startswith(pat_clean + "/") or path_str.endswith("/" + pat_clean):
+                return True
+        return False
+
+    def is_path_ignored(self, file_path: str | Path) -> bool:
+        """Alias for is_file_ignored."""
+        return self.is_file_ignored(file_path)
+
+    def is_rule_suppressed(self, rule_id: str, file_path: Optional[str | Path] = None) -> bool:
+        """Checks if a rule is suppressed globally or for a specific file path."""
+        import fnmatch
+
+        if rule_id in self.global_ignored_rules:
+            return True
+
+        if not file_path:
+            return False
+
+        f_path = Path(file_path)
+        path_str = str(f_path).replace("\\", "/")
+        basename = f_path.name
+
+        for pat, rules in self.rule_suppressions.items():
+            if rule_id in rules:
+                pat_clean = pat.rstrip("/")
+                if (
+                    fnmatch.fnmatch(basename, pat_clean)
+                    or fnmatch.fnmatch(path_str, pat)
+                    or fnmatch.fnmatch(path_str, f"*/{pat}")
+                    or path_str == pat_clean
+                    or path_str.endswith("/" + pat_clean)
+                    or path_str.startswith(pat_clean + "/")
+                ):
+                    return True
+
+        return False
+
+    def is_rule_ignored_for_path(self, file_path: str | Path, rule_id: str) -> bool:
+        """Checks if rule is ignored for path (caller parameter order helper)."""
+        return self.is_rule_suppressed(rule_id=rule_id, file_path=file_path)
+
+
 class PIIEngine:
     """Core regex and heuristic privacy scanner."""
 
@@ -171,17 +295,23 @@ class PIIEngine:
         r"(?i)\b(?:api_key|apikey|secret_key|secret|password|access_token|auth_token)\s*[:=]\s*['\"]([A-Za-z0-9_\-\.\$\#\@\%]{10,})['\"]"
     )
 
+    _RE_INLINE_IGNORE = re.compile(
+        r"(?:#|//|/\*|<!--)\s*sanitize:ignore(?:=([A-Za-z0-9_,-]+))?"
+    )
+
     def __init__(
         self,
         target_usernames: Optional[Sequence[str]] = None,
         target_hostnames: Optional[Sequence[str]] = None,
         auto_detect_system: bool = True,
         ignored_rules: Optional[Sequence[RuleID]] = None,
+        sanitize_ignore: Optional[SanitizeIgnore] = None,
     ) -> None:
-        """Initializes the engine with dynamic and target identity parameters."""
+        """Initializes the engine with dynamic, target identity, and ignore configuration."""
         self.ignored_rules: set[RuleID] = set(ignored_rules or [])
         self.target_usernames: set[str] = set(target_usernames or [])
         self.target_hostnames: set[str] = set(target_hostnames or [])
+        self.sanitize_ignore: SanitizeIgnore = sanitize_ignore or SanitizeIgnore()
 
         if auto_detect_system:
             try:
@@ -217,8 +347,16 @@ class PIIEngine:
             findings.extend(self.scan_line(line, line_num=line_num, file_path=file_path))
         return findings
 
-    def scan_line(self, line: str, line_num: int = 1, file_path: str = "<stdin>") -> list[PIIFinding]:
+    def scan_line(
+        self,
+        line: str,
+        line_num: int = 1,
+        file_path: str = "<stdin>",
+        line_number: Optional[int] = None,
+    ) -> list[PIIFinding]:
         """Scans a single string line for PII and privacy patterns."""
+        if line_number is not None:
+            line_num = line_number
         findings: list[PIIFinding] = []
         matched_spans: set[tuple[int, int]] = set()
 
@@ -228,6 +366,17 @@ class PIIEngine:
         # Skip lines that are themselves redaction templates
         if "<REDACTED" in line:
             return []
+
+        # Check inline rule suppression directive: # sanitize:ignore or # sanitize:ignore=RULE_ID
+        inline_suppressed_rules: Optional[set[str]] = None
+        ignore_match = self._RE_INLINE_IGNORE.search(line)
+        if ignore_match:
+            rule_arg = ignore_match.group(1)
+            if rule_arg:
+                inline_suppressed_rules = {r.strip() for r in rule_arg.split(",") if r.strip()}
+            else:
+                # Suppress all rules on this line
+                return []
 
         # 1. Private Keys
         if RuleID.PRIVATE_KEY not in self.ignored_rules:
@@ -543,12 +692,30 @@ class PIIEngine:
                             )
                         )
 
+        # Apply inline suppression and .sanitizeignore rule suppressions
+        if inline_suppressed_rules is not None:
+            findings = [f for f in findings if f.rule_id.value not in inline_suppressed_rules]
+
+        if self.sanitize_ignore:
+            findings = [
+                f for f in findings
+                if not self.sanitize_ignore.is_rule_suppressed(f.rule_id.value, file_path)
+            ]
+
         return findings
 
-    def scan_file(self, file_path: str | Path) -> list[PIIFinding]:
+    def scan_file(
+        self,
+        file_path: str | Path,
+        ignore: Optional[SanitizeIgnore] = None,
+    ) -> list[PIIFinding]:
         """Reads a file from disk and performs comprehensive PII scanning."""
         path = Path(file_path)
         if not path.is_file():
+            return []
+
+        active_ignore = ignore or self.sanitize_ignore
+        if active_ignore and active_ignore.is_file_ignored(path):
             return []
 
         try:
@@ -556,17 +723,27 @@ class PIIEngine:
         except Exception:
             return []
 
-        return self.scan_text(content, file_path=str(path))
+        findings = self.scan_text(content, file_path=str(path))
+        if ignore:
+            findings = [
+                f for f in findings
+                if not ignore.is_rule_suppressed(f.rule_id.value, str(path))
+            ]
+        return findings
 
     def scan_directory(
         self,
         directory: str | Path,
         ignore_patterns: Optional[Sequence[str]] = None,
     ) -> list[PIIFinding]:
-        """Recursively scans directory tree while honoring ignore patterns."""
+        """Recursively scans directory tree while honoring ignore patterns and .sanitizeignore."""
         root = Path(directory)
         if not root.exists():
             return []
+
+        # Auto-load .sanitizeignore from root if not already configured
+        if not self.sanitize_ignore.patterns and (root / ".sanitizeignore").is_file():
+            self.sanitize_ignore = SanitizeIgnore.load(root)
 
         patterns = list(ignore_patterns or [
             ".git",
@@ -579,6 +756,9 @@ class PIIEngine:
             "*.jpg",
             "*.jpeg",
             "*.gif",
+            "*.webp",
+            "*.mp3",
+            "*.wav",
             "*.ico",
             "*.pdf",
         ])
@@ -590,6 +770,7 @@ class PIIEngine:
                 d for d in dirs
                 if not any(re.search(rf"\b{re.escape(d)}\b", p) for p in patterns)
                 and not d.startswith(".")
+                and not (self.sanitize_ignore and self.sanitize_ignore.is_file_ignored(Path(curr_root) / d))
             ]
 
             for f in files:
@@ -597,6 +778,9 @@ class PIIEngine:
                 # Check file ignore pattern
                 rel_path = str(filepath.relative_to(root))
                 if any(filepath.match(p) or rel_path == p for p in patterns):
+                    continue
+
+                if self.sanitize_ignore and self.sanitize_ignore.is_file_ignored(filepath):
                     continue
 
                 # Only scan text-like files

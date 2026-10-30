@@ -4,8 +4,11 @@ Provides zero-dependency binary parsing and stripping for:
 - PNG chunks: tEXt, iTXt, zTXt, eXIf, tIME (with CRC32 integrity verification)
 - JPEG segments: APP1 (EXIF / GPS / XMP), APP2 (ICC profile), COM (comments)
 - GIF extension blocks: 0x21 0xFE comment sub-blocks
+- WebP chunks: EXIF and XMP chunks inside RIFF containers with VP8X flag updates
+- MP3 audio streams: ID3v2 (synchsafe integer size) and ID3v1 metadata tags
+- WAV audio containers: LIST/INFO metadata chunks and embedded ID3 tags
 
-Guarantees binary preservation of image raster/entropy payload and color palettes.
+Guarantees binary preservation of audio streams, image rasters, and color palettes.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ class MetadataChunkInfo:
 
 @dataclass(frozen=True)
 class ScrubResult:
-    """Outcome of an image sanitization operation."""
+    """Outcome of an image or audio sanitization operation."""
     file_path: str
     media_format: str
     original_size: int
@@ -52,6 +55,9 @@ class ScrubResult:
             "error": self.error,
         }
 
+
+# File Format Extensions
+SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".wav"}
 
 # PNG Constants
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -76,9 +82,20 @@ GIF_GRAPHIC_CONTROL_LABEL = 0xF9
 GIF_APP_EXTENSION_LABEL = 0xFF
 GIF_IMAGE_DESCRIPTOR = 0x2C
 
+# WebP & RIFF Constants
+RIFF_MAGIC = b"RIFF"
+WEBP_MAGIC = b"WEBP"
+WAVE_MAGIC = b"WAVE"
+DEFAULT_WEBP_STRIP = {b"EXIF", b"XMP "}
+
+# MP3 & ID3 Constants
+ID3_MAGIC = b"ID3"
+
 
 class MediaScrubber:
-    """Binary parser and metadata scrubber for PNG, JPEG, and GIF formats."""
+    """Binary parser and metadata scrubber for PNG, JPEG, GIF, WebP, MP3, and WAV formats."""
+
+    SUPPORTED_EXTENSIONS = SUPPORTED_EXTENSIONS
 
     @staticmethod
     def detect_format(data: bytes) -> Optional[str]:
@@ -89,6 +106,16 @@ class MediaScrubber:
             return "JPEG"
         if len(data) >= 6 and (data[:6] == GIF87A_SIGNATURE or data[:6] == GIF89A_SIGNATURE):
             return "GIF"
+        if len(data) >= 12 and data[:4] == RIFF_MAGIC:
+            sub_type = data[8:12]
+            if sub_type == WEBP_MAGIC:
+                return "WEBP"
+            if sub_type == WAVE_MAGIC:
+                return "WAV"
+        if len(data) >= 3 and data[:3] == ID3_MAGIC:
+            return "MP3"
+        if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+            return "MP3"
         return None
 
     # =========================================================================
@@ -192,7 +219,6 @@ class MediaScrubber:
         while offset < data_len:
             # Advance through fill 0xFF bytes
             if data[offset] != 0xFF:
-                # Seek to next 0xFF
                 next_ff = data.find(b"\xFF", offset)
                 if next_ff == -1:
                     out.extend(data[offset:])
@@ -231,7 +257,7 @@ class MediaScrubber:
             if seg_len < 2:
                 raise ValueError(f"Invalid JPEG segment length {seg_len} at offset {offset}")
 
-            total_seg_len = seg_len  # Length field includes the 2 length bytes
+            total_seg_len = seg_len
             if offset + total_seg_len > data_len:
                 raise ValueError(f"Truncated JPEG segment data for marker 0x{marker:02X}")
 
@@ -255,9 +281,7 @@ class MediaScrubber:
                 out.extend(data[offset:offset + total_seg_len])
                 offset += total_seg_len
 
-                # If this was SOS (Start of Scan), entropy-coded scan data follows immediately
                 if marker == JPEG_SOS:
-                    # Scan until next non-stuffed marker
                     scan_start = offset
                     while offset < data_len:
                         marker_pos = data.find(b"\xFF", offset)
@@ -268,15 +292,12 @@ class MediaScrubber:
 
                         next_byte = data[marker_pos + 1]
                         if next_byte == 0x00 or (0xD0 <= next_byte <= 0xD7):
-                            # Stuffed byte or restart marker inside scan data
                             offset = marker_pos + 2
                         else:
-                            # Genuine marker terminating entropy scan
                             out.extend(data[scan_start:marker_pos])
                             offset = marker_pos
                             break
 
-        # Ensure EOI is present
         if not out.endswith(JPEG_EOI):
             out.extend(JPEG_EOI)
 
@@ -332,7 +353,6 @@ class MediaScrubber:
         stripped: list[str] = []
         findings: list[MetadataChunkInfo] = []
 
-        # Process blocks
         while offset < data_len:
             block_type = data[offset]
 
@@ -373,9 +393,7 @@ class MediaScrubber:
                         )
                     )
                 else:
-                    # Retain other extensions (e.g. Graphic Control 0xF9, Application 0xFF)
                     out.extend(data[ext_start:offset])
-                    # Copy sub-blocks
                     while offset < data_len:
                         sub_len = data[offset]
                         out.append(sub_len)
@@ -388,7 +406,6 @@ class MediaScrubber:
                         offset += sub_len
 
             elif block_type == GIF_IMAGE_DESCRIPTOR:  # 0x2C
-                # Image Descriptor: 10 bytes (0x2C + 9 bytes)
                 if offset + 10 > data_len:
                     raise ValueError("Truncated GIF Image Descriptor")
 
@@ -396,7 +413,6 @@ class MediaScrubber:
                 out.extend(data[offset:offset + 10])
                 offset += 10
 
-                # Local Color Table if bit 7 set
                 has_lct = bool(img_packed & 0x80)
                 if has_lct:
                     lct_size = 3 * (2 ** ((img_packed & 0x07) + 1))
@@ -405,13 +421,11 @@ class MediaScrubber:
                     out.extend(data[offset:offset + lct_size])
                     offset += lct_size
 
-                # LZW minimum code size
                 if offset >= data_len:
                     raise ValueError("Missing GIF LZW code size")
                 out.append(data[offset])
                 offset += 1
 
-                # Image data sub-blocks
                 while offset < data_len:
                     sub_len = data[offset]
                     out.append(sub_len)
@@ -424,13 +438,209 @@ class MediaScrubber:
                     offset += sub_len
 
             else:
-                # Unknown block byte, terminate or append safely
                 out.append(block_type)
                 offset += 1
 
         if not out.endswith(bytes([GIF_TRAILER])):
             out.append(GIF_TRAILER)
 
+        return bytes(out), stripped, findings
+
+    # =========================================================================
+    # WEBP PARSER & SCRUBBER (RIFF Container)
+    # =========================================================================
+
+    @classmethod
+    def _parse_webp(
+        cls,
+        data: bytes,
+        strip_chunks: set[bytes] = DEFAULT_WEBP_STRIP,
+    ) -> Tuple[bytes, list[str], list[MetadataChunkInfo]]:
+        """Parses RIFF/WEBP FourCC chunks, strips EXIF and XMP, and updates VP8X flags."""
+        if len(data) < 12 or data[:4] != RIFF_MAGIC or data[8:12] != WEBP_MAGIC:
+            raise ValueError("Invalid WebP/RIFF header")
+
+        data_len = len(data)
+        out = bytearray(data[:12])  # 4 bytes RIFF, 4 bytes size, 4 bytes WEBP
+        offset = 12
+        stripped: list[str] = []
+        findings: list[MetadataChunkInfo] = []
+
+        while offset < data_len:
+            if offset + 8 > data_len:
+                raise ValueError(f"Truncated WebP chunk header at offset {offset}")
+
+            fourcc = data[offset:offset + 4]
+            chunk_len = struct.unpack("<I", data[offset + 4:offset + 8])[0]
+            pad = chunk_len % 2
+            total_len = 8 + chunk_len + pad
+
+            if offset + 8 + chunk_len > data_len:
+                raise ValueError(f"Truncated WebP chunk {fourcc.decode('latin1', errors='replace')} data")
+
+            fourcc_str = fourcc.decode("latin1", errors="replace")
+
+            if fourcc in strip_chunks:
+                stripped.append(fourcc_str.strip())
+                findings.append(
+                    MetadataChunkInfo(
+                        media_format="WEBP",
+                        chunk_type=fourcc_str.strip(),
+                        offset=offset,
+                        size=total_len,
+                        description=f"WebP metadata chunk: {fourcc_str.strip()} ({chunk_len} bytes payload)",
+                    )
+                )
+            elif fourcc == b"VP8X":
+                # Extended header: clear EXIF (0x08) and XMP (0x04) flag bits in byte 0 of payload
+                chunk_payload = bytearray(data[offset + 8:offset + 8 + chunk_len])
+                if len(chunk_payload) >= 1:
+                    chunk_payload[0] &= ~(0x08 | 0x04)
+
+                out.extend(b"VP8X")
+                out.extend(struct.pack("<I", len(chunk_payload)))
+                out.extend(chunk_payload)
+                if pad:
+                    out.append(0)
+            else:
+                out.extend(data[offset:offset + total_len])
+
+            offset += total_len
+
+        # Recalculate RIFF size header
+        out[4:8] = struct.pack("<I", len(out) - 8)
+        return bytes(out), stripped, findings
+
+    # =========================================================================
+    # MP3 PARSER & SCRUBBER (ID3v2 and ID3v1 Tags)
+    # =========================================================================
+
+    @classmethod
+    def _parse_mp3(
+        cls,
+        data: bytes,
+    ) -> Tuple[bytes, list[str], list[MetadataChunkInfo]]:
+        """Parses MP3 audio stream and strips ID3v2 and ID3v1 metadata tags."""
+        if len(data) < 10:
+            raise ValueError("Invalid MP3 file: insufficient data")
+
+        stripped: list[str] = []
+        findings: list[MetadataChunkInfo] = []
+        data_len = len(data)
+        start_offset = 0
+
+        # Check ID3v2 tag at the start of stream
+        if data[:3] == ID3_MAGIC:
+            ver_major = data[3]
+            flags = data[5]
+            # Decode synchsafe integer (7 bits per byte across bytes 6..9)
+            tag_size = (
+                (data[6] << 21)
+                | (data[7] << 14)
+                | (data[8] << 7)
+                | data[9]
+            )
+            has_footer = bool(flags & 0x10)
+            total_tag_size = 10 + tag_size + (10 if has_footer else 0)
+
+            if total_tag_size > data_len:
+                raise ValueError("Truncated ID3v2 tag payload")
+
+            tag_name = f"ID3v2.{ver_major}"
+            stripped.append(tag_name)
+            findings.append(
+                MetadataChunkInfo(
+                    media_format="MP3",
+                    chunk_type=tag_name,
+                    offset=0,
+                    size=total_tag_size,
+                    description=f"MP3 ID3v2.{ver_major} metadata tag ({total_tag_size} bytes)",
+                )
+            )
+            start_offset = total_tag_size
+
+        # Check ID3v1 tag at the end of stream (last 128 bytes starting with 'TAG')
+        end_offset = data_len
+        if end_offset - start_offset >= 128 and data[end_offset - 128:end_offset - 125] == b"TAG":
+            stripped.append("ID3v1")
+            findings.append(
+                MetadataChunkInfo(
+                    media_format="MP3",
+                    chunk_type="ID3v1",
+                    offset=end_offset - 128,
+                    size=128,
+                    description="MP3 ID3v1 metadata tag (128 bytes)",
+                )
+            )
+            end_offset -= 128
+
+        cleaned = data[start_offset:end_offset]
+        return cleaned, stripped, findings
+
+    # =========================================================================
+    # WAV PARSER & SCRUBBER (RIFF/WAVE Container)
+    # =========================================================================
+
+    @classmethod
+    def _parse_wav(
+        cls,
+        data: bytes,
+    ) -> Tuple[bytes, list[str], list[MetadataChunkInfo]]:
+        """Parses RIFF/WAVE container and strips LIST/INFO and ID3 metadata chunks."""
+        if len(data) < 12 or data[:4] != RIFF_MAGIC or data[8:12] != WAVE_MAGIC:
+            raise ValueError("Invalid WAV/RIFF header")
+
+        data_len = len(data)
+        out = bytearray(data[:12])
+        offset = 12
+        stripped: list[str] = []
+        findings: list[MetadataChunkInfo] = []
+
+        while offset < data_len:
+            if offset + 8 > data_len:
+                raise ValueError(f"Truncated WAV chunk header at offset {offset}")
+
+            fourcc = data[offset:offset + 4]
+            chunk_len = struct.unpack("<I", data[offset + 4:offset + 8])[0]
+            pad = chunk_len % 2
+            total_len = 8 + chunk_len + pad
+
+            if offset + 8 + chunk_len > data_len:
+                raise ValueError(f"Truncated WAV chunk {fourcc.decode('latin1', errors='replace')} data")
+
+            fourcc_str = fourcc.decode("latin1", errors="replace")
+
+            # Check if chunk is LIST/INFO or embedded ID3/INFO metadata
+            is_metadata = False
+            meta_type = fourcc_str
+
+            if fourcc == b"LIST":
+                list_type = data[offset + 8:offset + 12] if chunk_len >= 4 else b""
+                if list_type in (b"INFO", b"adtl"):
+                    is_metadata = True
+                    meta_type = f"LIST/{list_type.decode('latin1', errors='replace')}"
+            elif fourcc.lower() in (b"id3 ", b"info"):
+                is_metadata = True
+                meta_type = fourcc_str.strip()
+
+            if is_metadata:
+                stripped.append(meta_type)
+                findings.append(
+                    MetadataChunkInfo(
+                        media_format="WAV",
+                        chunk_type=meta_type,
+                        offset=offset,
+                        size=total_len,
+                        description=f"WAV audio metadata chunk: {meta_type} ({chunk_len} bytes)",
+                    )
+                )
+            else:
+                out.extend(data[offset:offset + total_len])
+
+            offset += total_len
+
+        # Recalculate RIFF size header
+        out[4:8] = struct.pack("<I", len(out) - 8)
         return bytes(out), stripped, findings
 
     # =========================================================================
@@ -443,10 +653,10 @@ class MediaScrubber:
         data: bytes,
         format_hint: Optional[str] = None,
     ) -> Tuple[str, list[MetadataChunkInfo]]:
-        """Analyzes binary image data and returns all detected metadata chunks."""
+        """Analyzes binary media data and returns all detected metadata chunks."""
         fmt = (format_hint or cls.detect_format(data) or "").upper()
         if not fmt:
-            raise ValueError("Unsupported or unknown image format")
+            raise ValueError("Unsupported or unknown media format")
 
         if fmt == "PNG":
             _, _, findings = cls._parse_png(data, DEFAULT_PNG_STRIP)
@@ -457,6 +667,15 @@ class MediaScrubber:
         elif fmt == "GIF":
             _, _, findings = cls._parse_gif(data)
             return "GIF", findings
+        elif fmt == "WEBP":
+            _, _, findings = cls._parse_webp(data, DEFAULT_WEBP_STRIP)
+            return "WEBP", findings
+        elif fmt == "MP3":
+            _, _, findings = cls._parse_mp3(data)
+            return "MP3", findings
+        elif fmt in ("WAV", "WAVE"):
+            _, _, findings = cls._parse_wav(data)
+            return "WAV", findings
         else:
             raise ValueError(f"Unsupported format: {fmt}")
 
@@ -466,10 +685,10 @@ class MediaScrubber:
         data: bytes,
         format_hint: Optional[str] = None,
     ) -> Tuple[bytes, list[str], str]:
-        """Scrubs metadata from image bytes in memory."""
+        """Scrubs metadata from media bytes in memory."""
         fmt = (format_hint or cls.detect_format(data) or "").upper()
         if not fmt:
-            raise ValueError("Unsupported or unknown image format")
+            raise ValueError("Unsupported or unknown media format")
 
         if fmt == "PNG":
             cleaned, stripped, _ = cls._parse_png(data, DEFAULT_PNG_STRIP)
@@ -480,12 +699,21 @@ class MediaScrubber:
         elif fmt == "GIF":
             cleaned, stripped, _ = cls._parse_gif(data)
             return cleaned, stripped, "GIF"
+        elif fmt == "WEBP":
+            cleaned, stripped, _ = cls._parse_webp(data, DEFAULT_WEBP_STRIP)
+            return cleaned, stripped, "WEBP"
+        elif fmt == "MP3":
+            cleaned, stripped, _ = cls._parse_mp3(data)
+            return cleaned, stripped, "MP3"
+        elif fmt in ("WAV", "WAVE"):
+            cleaned, stripped, _ = cls._parse_wav(data)
+            return cleaned, stripped, "WAV"
         else:
             raise ValueError(f"Unsupported format: {fmt}")
 
     @classmethod
     def inspect_file(cls, path: str | Path) -> Tuple[str, list[MetadataChunkInfo]]:
-        """Inspects an image file on disk for metadata."""
+        """Inspects a media file on disk for metadata."""
         file_p = Path(path)
         data = file_p.read_bytes()
         return cls.inspect_bytes(data)
@@ -497,7 +725,7 @@ class MediaScrubber:
         dst_path: Optional[str | Path] = None,
         inplace: bool = False,
     ) -> ScrubResult:
-        """Scrubs an image file on disk, supporting in-place or separate output."""
+        """Scrubs a media file on disk, supporting in-place or separate output."""
         src = Path(src_path)
         if not src.is_file():
             return ScrubResult(

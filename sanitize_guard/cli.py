@@ -1,8 +1,8 @@
 """Command-line interface for Sanitize Guard.
 
 Subcommands:
-- audit: Scan directory or files for PII, paths, credentials, and image metadata.
-- scrub-media: Strip metadata chunks from PNG, JPEG, and GIF images.
+- audit / scan: Scan directory or files for PII, paths, credentials, and media metadata.
+- scrub-media: Strip metadata chunks from PNG, JPEG, GIF, WebP, MP3, and WAV media.
 - redact-dotfiles: Transform personal dotfiles into safe public templates.
 - check-git: Forensic audit of git commit graph authors, emails, and patches.
 - install-hook: Install automated pre-commit or pre-push zero-leak security gates.
@@ -19,8 +19,17 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from sanitize_guard.dotfile_redactor import DotfileRedactor
-from sanitize_guard.media_scrubber import MediaScrubber
-from sanitize_guard.pii_engine import PIIEngine, PIIFinding, RuleID, Severity
+from sanitize_guard.media_scrubber import (
+    SUPPORTED_EXTENSIONS,
+    MediaScrubber,
+)
+from sanitize_guard.pii_engine import (
+    PIIEngine,
+    PIIFinding,
+    RuleID,
+    SanitizeIgnore,
+    Severity,
+)
 from sanitize_guard.sarif import ASCIITableExporter, SARIFExporter
 
 SEVERITY_ORDER = {
@@ -41,11 +50,15 @@ FAIL_ON_MAP = {
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
-    """Executes the 'audit' subcommand."""
+    """Executes the 'audit' or 'scan' subcommand."""
     target_path = Path(args.path).resolve()
     if not target_path.exists():
         print(f"Error: Target path '{args.path}' does not exist.", file=sys.stderr)
         return 2
+
+    # Load .sanitizeignore from target directory or repository root
+    ignore_dir = target_path if target_path.is_dir() else target_path.parent
+    sanitize_ignore = SanitizeIgnore.load(ignore_dir)
 
     # Parse ignore patterns
     ignore_patterns = [p.strip() for p in args.ignore.split(",") if p.strip()] if args.ignore else None
@@ -57,6 +70,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
         target_usernames=target_users,
         target_hostnames=target_hosts,
         auto_detect_system=not args.no_auto_detect,
+        sanitize_ignore=sanitize_ignore,
     )
 
     findings: list[PIIFinding] = []
@@ -67,26 +81,27 @@ def cmd_audit(args: argparse.Namespace) -> int:
     else:
         findings.extend(engine.scan_directory(target_path, ignore_patterns=ignore_patterns))
 
-    # Also inspect image files if present
-    img_extensions = {".png", ".jpg", ".jpeg", ".gif"}
-    image_files: list[Path] = []
+    # Also inspect supported media files (images and audio) if present
+    media_files: list[Path] = []
     if target_path.is_file():
-        if target_path.suffix.lower() in img_extensions:
-            image_files.append(target_path)
+        if target_path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            if not sanitize_ignore.is_file_ignored(target_path):
+                media_files.append(target_path)
     else:
         for root, _, files in os.walk(target_path):
             if ".git" in root or "__pycache__" in root:
                 continue
             for f in files:
                 p = Path(root) / f
-                if p.suffix.lower() in img_extensions:
-                    image_files.append(p)
+                if p.suffix.lower() in SUPPORTED_EXTENSIONS:
+                    if not sanitize_ignore.is_file_ignored(p):
+                        media_files.append(p)
 
-    for img_p in image_files:
+    for media_p in media_files:
         try:
-            _, chunk_findings = MediaScrubber.inspect_file(img_p)
+            _, chunk_findings = MediaScrubber.inspect_file(media_p)
             for cf in chunk_findings:
-                rel_p = str(img_p.relative_to(target_path)) if target_path.is_dir() else str(img_p)
+                rel_p = str(media_p.relative_to(target_path)) if target_path.is_dir() else str(media_p)
                 findings.append(
                     PIIFinding(
                         rule_id=RuleID("SAN-010"),
@@ -147,11 +162,12 @@ def cmd_scrub_media(args: argparse.Namespace) -> int:
             for root, _, files in os.walk(p):
                 for f in files:
                     ext = Path(f).suffix.lower()
-                    if ext in (".png", ".jpg", ".jpeg", ".gif"):
+                    if ext in SUPPORTED_EXTENSIONS:
                         targets.append(Path(root) / f)
 
     if not targets:
-        print("No image files (.png, .jpg, .jpeg, .gif) found to scrub.")
+        ext_list = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+        print(f"No media files ({ext_list}) found to scrub.")
         return 0
 
     total_saved = 0
@@ -160,44 +176,44 @@ def cmd_scrub_media(args: argparse.Namespace) -> int:
 
     print(f"Found {len(targets)} media file(s). Processing...")
 
-    for img_p in targets:
+    for media_p in targets:
         try:
-            raw_data = img_p.read_bytes()
+            raw_data = media_p.read_bytes()
             fmt, findings = MediaScrubber.inspect_bytes(raw_data)
             if not findings:
                 if args.verbose:
-                    print(f"  [CLEAN] {img_p} (0 metadata chunks)")
+                    print(f"  [CLEAN] {media_p} (0 metadata chunks)")
                 continue
 
             stripped_names = [f.chunk_type for f in findings]
             if args.dry_run:
-                print(f"  [DRY-RUN] {img_p}: would strip {len(findings)} chunk(s): {', '.join(stripped_names)}")
+                print(f"  [DRY-RUN] {media_p}: would strip {len(findings)} chunk(s): {', '.join(stripped_names)}")
                 continue
 
             out_target = None
             if args.output:
                 out_dir = Path(args.output)
-                out_target = out_dir / img_p.name
+                out_target = out_dir / media_p.name
 
             res = MediaScrubber.scrub_file(
-                src_path=img_p,
+                src_path=media_p,
                 dst_path=out_target,
                 inplace=args.inplace or (not args.output),
             )
 
             if res.error:
-                print(f"  [ERROR] {img_p}: {res.error}", file=sys.stderr)
+                print(f"  [ERROR] {media_p}: {res.error}", file=sys.stderr)
             elif res.is_modified:
                 modified_count += 1
                 total_saved += res.bytes_saved
                 total_stripped += len(res.stripped_chunks)
                 print(
-                    f"  [SCRUBBED] {img_p} ({res.media_format}): "
+                    f"  [SCRUBBED] {media_p} ({res.media_format}): "
                     f"removed {len(res.stripped_chunks)} chunk(s) [{', '.join(res.stripped_chunks)}], "
                     f"saved {res.bytes_saved} bytes"
                 )
         except Exception as e:
-            print(f"  [SKIP] {img_p}: {e}", file=sys.stderr)
+            print(f"  [SKIP] {media_p}: {e}", file=sys.stderr)
 
     print("-" * 60)
     print(
@@ -270,7 +286,6 @@ def cmd_redact_dotfiles(args: argparse.Namespace) -> int:
 def cmd_check_git(args: argparse.Namespace) -> int:
     """Executes forensic check on git commit history."""
     try:
-        # Check git repository presence
         rev_parse = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
@@ -281,7 +296,6 @@ def cmd_check_git(args: argparse.Namespace) -> int:
             print("Error: Not inside a git repository.", file=sys.stderr)
             return 2
 
-        # Check commits
         log_format = "%H|%an|%ae|%s"
         max_commits = args.commits if args.commits > 0 else 100
         cmd = ["git", "log", f"-n{max_commits}", f"--format={log_format}"]
@@ -326,7 +340,6 @@ def cmd_check_git(args: argparse.Namespace) -> int:
                 check=False,
             )
             if diff_res.returncode == 0:
-                # Scan added lines per file, excluding test fixtures and samples
                 current_file = ""
                 added_lines: list[str] = []
                 for d_line in diff_res.stdout.splitlines():
@@ -365,7 +378,7 @@ def cmd_check_git(args: argparse.Namespace) -> int:
 
 
 def cmd_install_hook(args: argparse.Namespace) -> int:
-    """Installs zero-leak git hook."""
+    """Installs zero-leak git hook (defaults to pre-commit)."""
     repo_path = Path(args.path).resolve()
     git_dir = repo_path / ".git"
     if not git_dir.is_dir():
@@ -375,7 +388,8 @@ def cmd_install_hook(args: argparse.Namespace) -> int:
     hooks_dir = git_dir / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
 
-    hook_name = args.hook.lower()
+    hook_name = getattr(args, "hook", "pre-commit") or "pre-commit"
+    hook_name = hook_name.lower()
     hook_file = hooks_dir / hook_name
 
     script_content = f"""#!/usr/bin/env bash
@@ -385,15 +399,24 @@ def cmd_install_hook(args: argparse.Namespace) -> int:
 # ==============================================================================
 set -euo pipefail
 
-echo "[sanitize-guard] Executing pre-flight zero-leak audit..."
+echo "[sanitize-guard] Executing {hook_name} zero-leak audit..."
 
-# 1. Audit working tree files
-python3 -m sanitize_guard.cli audit . --fail-on high --format table
+# Resolve executable command
+if command -v sanitize-guard >/dev/null 2>&1; then
+    RUNNER="sanitize-guard"
+elif command -v sanitize >/dev/null 2>&1; then
+    RUNNER="sanitize"
+else
+    RUNNER="python3 -m sanitize_guard.cli"
+fi
+
+# 1. Audit working tree files for unredacted PII and unstripped media metadata
+$RUNNER scan . --fail-on medium --format table
 
 # 2. Check git commit-graph integrity
-python3 -m sanitize_guard.cli check-git --fail-on-leak
+$RUNNER check-git --fail-on-leak
 
-echo "[sanitize-guard] PASS: Repository is clean and sanitized."
+echo "[sanitize-guard] PASS: Repository is clean and sanitized. Commit authorized."
 exit 0
 """
 
@@ -413,20 +436,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
 
-    # Subcommand: audit
-    p_audit = subparsers.add_parser("audit", help="Audit directory or files for PII and metadata leaks")
-    p_audit.add_argument("path", nargs="?", default=".", help="Path to directory or file (default: .)")
-    p_audit.add_argument("--format", choices=["table", "sarif", "json"], default="table", help="Output report format")
-    p_audit.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "none"], default="high", help="Failure threshold")
-    p_audit.add_argument("--ignore", default="", help="Comma-separated ignore patterns")
-    p_audit.add_argument("--output", "-o", default="", help="Output report file path")
-    p_audit.add_argument("--target-user", default="", help="Specific OS username to scan for")
-    p_audit.add_argument("--target-host", default="", help="Specific hostname to scan for")
-    p_audit.add_argument("--no-auto-detect", action="store_true", help="Disable automatic detection of system user/host")
-    p_audit.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
+    # Subcommands: audit and scan (aliases)
+    for sub_name in ("audit", "scan"):
+        p_sub = subparsers.add_parser(sub_name, help="Scan directory or files for PII and metadata leaks")
+        p_sub.add_argument("path", nargs="?", default=".", help="Path to directory or file (default: .)")
+        p_sub.add_argument("--format", choices=["table", "sarif", "json"], default="table", help="Output report format")
+        p_sub.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "none"], default="high", help="Failure threshold")
+        p_sub.add_argument("--ignore", default="", help="Comma-separated ignore patterns")
+        p_sub.add_argument("--output", "-o", default="", help="Output report file path")
+        p_sub.add_argument("--target-user", default="", help="Specific OS username to scan for")
+        p_sub.add_argument("--target-host", default="", help="Specific hostname to scan for")
+        p_sub.add_argument("--no-auto-detect", action="store_true", help="Disable automatic detection of system user/host")
+        p_sub.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
 
     # Subcommand: scrub-media
-    p_scrub = subparsers.add_parser("scrub-media", help="Strip metadata chunks from PNG, JPEG, and GIF images")
+    p_scrub = subparsers.add_parser("scrub-media", help="Strip metadata chunks from PNG, JPEG, GIF, WebP, MP3, and WAV media")
     p_scrub.add_argument("paths", nargs="+", help="Files or directories to scrub")
     p_scrub.add_argument("--inplace", action="store_true", help="Overwrite input images directly")
     p_scrub.add_argument("--output", "-o", default="", help="Directory to save cleaned images")
@@ -450,8 +474,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_check_git.add_argument("--fail-on-leak", action="store_true", help="Exit with code 1 if any leak is detected")
 
     # Subcommand: install-hook
-    p_hook = subparsers.add_parser("install-hook", help="Install automated zero-leak git hook")
-    p_hook.add_argument("--hook", choices=["pre-commit", "pre-push"], default="pre-push", help="Hook type")
+    p_hook = subparsers.add_parser("install-hook", help="Install automated zero-leak git hook (default: pre-commit)")
+    p_hook.add_argument("--hook", choices=["pre-commit", "pre-push"], default="pre-commit", help="Hook type (default: pre-commit)")
     p_hook.add_argument("--path", default=".", help="Repository root path")
 
     return parser
@@ -466,7 +490,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    if args.subcommand == "audit":
+    if args.subcommand in ("audit", "scan"):
         return cmd_audit(args)
     elif args.subcommand == "scrub-media":
         return cmd_scrub_media(args)
