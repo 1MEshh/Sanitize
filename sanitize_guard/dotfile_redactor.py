@@ -79,6 +79,24 @@ class DotfileRedactor:
     _RE_SSH_HOSTNAME = re.compile(
         r"(?i)(HostName\s+)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"
     )
+    _RE_WEATHER_QUERY_KEY = re.compile(
+        r"(?i)([?&](?:appid|api_key|apikey|key)=)([A-Za-z0-9_-]{8,})"
+    )
+    _RE_WEATHER_ENV_KEY = re.compile(
+        r"(?i)(\b(?:WEATHER_API_KEY|OWM_API_KEY|OPENWEATHER_API_KEY|WEATHERAPI_KEY|api[-_]?key)\b\s*[:=]\s*['\"]?)([A-Za-z0-9_-]{8,})(['\"]?)"
+    )
+    _RE_GEO_QUERY_COORD = re.compile(
+        r"(?i)([?&](?:lat|latitude|lon|lng|longitude)=)(-?\d{1,3}(?:\.\d+)?)"
+    )
+    _RE_GEO_VAR_COORD = re.compile(
+        r"(?i)([\"']?\b(?:lat|latitude|lon|lng|longitude)\b[\"']?\s*[:=]\s*['\"]?)(-?\d{1,3}\.\d{2,})(['\"]?)"
+    )
+    _RE_WTTR_LOCATION = re.compile(
+        r"(?i)(https?://(?:www\.)?wttr\.in/)([^?\s'\"`#]+)"
+    )
+    _RE_WEATHER_CITY_VAR = re.compile(
+        r"(?i)([\"']?\b(?:CITY|WEATHER_CITY|LOCATION|WEATHER_LOCATION)\b[\"']?\s*[:=]\s*['\"])([^'\"<\n]{2,})(['\"])"
+    )
 
     def __init__(
         self,
@@ -88,6 +106,60 @@ class DotfileRedactor:
         self.default_git_name = default_git_name
         self.default_git_email = default_git_email
         self.pii_engine = PIIEngine()
+
+    def _scrub_weather_line(
+        self, curr: str, line_idx: int, changes: list[RedactionChange]
+    ) -> str:
+        """Scrubs weather API keys and location coordinates from Waybar scripts/configs."""
+        rules: list[tuple[re.Pattern[str], str, str]] = [
+            (
+                self._RE_WEATHER_QUERY_KEY,
+                "<REDACTED_WEATHER_API_KEY>",
+                "Weather API query key scrubbed",
+            ),
+            (
+                self._RE_WEATHER_ENV_KEY,
+                "<REDACTED_WEATHER_API_KEY>",
+                "Weather API key scrubbed",
+            ),
+            (
+                self._RE_GEO_QUERY_COORD,
+                "<REDACTED_COORD>",
+                "Geographic coordinate scrubbed from weather URL",
+            ),
+            (
+                self._RE_GEO_VAR_COORD,
+                "<REDACTED_COORD>",
+                "Geographic coordinate scrubbed from Waybar script",
+            ),
+            (
+                self._RE_WTTR_LOCATION,
+                "<REDACTED_LOCATION>",
+                "Location query scrubbed from wttr.in URL",
+            ),
+            (
+                self._RE_WEATHER_CITY_VAR,
+                "<REDACTED_LOCATION>",
+                "Location identifier scrubbed from Waybar script",
+            ),
+        ]
+        for regex, placeholder, reason in rules:
+            for match in list(regex.finditer(curr)):
+                secret = match.group(2)
+                if secret.startswith("<"):
+                    continue
+                suffix = match.group(3) if len(match.groups()) >= 3 else ""
+                replacement = f"{match.group(1)}{placeholder}{suffix}"
+                curr = curr.replace(match.group(0), replacement, 1)
+                changes.append(
+                    RedactionChange(
+                        line_number=line_idx,
+                        original=secret,
+                        redacted=placeholder,
+                        reason=reason,
+                    )
+                )
+        return curr
 
     @staticmethod
     def _format_home_replacement(curr: str, sub_path: str, use_plain_home: bool) -> str:
@@ -111,6 +183,14 @@ class DotfileRedactor:
         is_gitconfig = ".gitconfig" in basename or basename == "config"
         is_hyprland = "hypr" in lower_path or basename.endswith(".conf")
         is_waybar = "waybar" in lower_path or basename.endswith((".jsonc", ".css", ".rasi"))
+        is_weather_context = (
+            is_waybar
+            or "weather" in lower_path
+            or any(
+                marker in content.lower()
+                for marker in ("openweathermap", "wttr.in", "weatherapi", "open-meteo", "weather_api")
+            )
+        )
         is_env = ".env" in basename
         is_ssh = "ssh" in filename or basename == "config"
         use_plain_home = is_hyprland or is_waybar
@@ -264,6 +344,10 @@ class DotfileRedactor:
                             reason="Hardware monitor EDID / serial redacted",
                         )
                     )
+
+            # 6. Scrub weather API keys and coordinates in Waybar custom scripts/configs
+            if is_weather_context:
+                curr = self._scrub_weather_line(curr, line_idx, changes)
 
             new_lines.append(curr)
 
