@@ -89,17 +89,31 @@ class DotfileRedactor:
         self.default_git_email = default_git_email
         self.pii_engine = PIIEngine()
 
+    @staticmethod
+    def _format_home_replacement(curr: str, sub_path: str, use_plain_home: bool) -> str:
+        """Selects an appropriate $HOME / ~ / ${HOME} placeholder based on file context."""
+        if "PATH=" in curr or "export " in curr:
+            return f"${{HOME}}/{sub_path}" if sub_path else "${HOME}"
+        if curr.strip().startswith(("exec-once", "source", ".")):
+            return f"~/{sub_path}" if sub_path else "~"
+        if use_plain_home:
+            return f"$HOME/{sub_path}" if sub_path else "$HOME"
+        return f"${{HOME}}/{sub_path}" if sub_path else "${HOME}"
+
     def redact_text(self, content: str, filename: str = "") -> RedactionResult:
         """Sanitizes text content and returns the redacted result with detailed diff."""
         lines = content.splitlines(keepends=True)
         new_lines: list[str] = []
         changes: list[RedactionChange] = []
         basename = os.path.basename(filename).lower()
+        lower_path = filename.lower()
 
         is_gitconfig = ".gitconfig" in basename or basename == "config"
-        is_hyprland = "hypr" in basename or basename.endswith(".conf")
+        is_hyprland = "hypr" in lower_path or basename.endswith(".conf")
+        is_waybar = "waybar" in lower_path or basename.endswith((".jsonc", ".css", ".rasi"))
         is_env = ".env" in basename
         is_ssh = "ssh" in filename or basename == "config"
+        use_plain_home = is_hyprland or is_waybar
 
         for line_idx, raw_line in enumerate(lines, start=1):
             curr = raw_line
@@ -112,14 +126,7 @@ class DotfileRedactor:
                 sub_path = match.group(3) or ""
 
                 if user_part.lower() not in GENERIC_USER_PLACEHOLDERS and not user_part.startswith("<"):
-                    # Choose replacement style based on context
-                    if "PATH=" in curr or "export " in curr:
-                        replacement = f"${{HOME}}/{sub_path}" if sub_path else "${HOME}"
-                    elif curr.strip().startswith(("exec-once", "source", ".")):
-                        replacement = f"~/{sub_path}" if sub_path else "~"
-                    else:
-                        replacement = f"${{HOME}}/{sub_path}" if sub_path else "${HOME}"
-
+                    replacement = self._format_home_replacement(curr, sub_path, use_plain_home)
                     curr = curr.replace(full_path, replacement)
                     changes.append(
                         RedactionChange(
@@ -136,7 +143,7 @@ class DotfileRedactor:
                 sub_path = match.group(3) or ""
 
                 if user_part.lower() not in GENERIC_USER_PLACEHOLDERS and not user_part.startswith("<"):
-                    replacement = f"${{HOME}}/{sub_path}" if sub_path else "${HOME}"
+                    replacement = self._format_home_replacement(curr, sub_path, use_plain_home)
                     curr = curr.replace(full_path, replacement)
                     changes.append(
                         RedactionChange(
