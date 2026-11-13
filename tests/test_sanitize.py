@@ -567,15 +567,64 @@ class TestDotfileRedactor(unittest.TestCase):
     def test_19_dotfile_redactor_hyprland(self) -> None:
         """Verify hyprland monitor hardware descriptors and exec paths are redacted."""
         exec_script = "/home" + "/synthdev/.config/hypr/scripts/launch.sh"
+        bind_script = "/home" + "/synthdev/.config/waybar/toggle.sh"
         content = (
             "monitor=desc:LG Electronics 27GL850 123456,2560x1440@144,0x0,1\n"
             f"exec-once = {exec_script}\n"
+            f"bind = SUPER, B, exec, {bind_script}\n"
         )
         res = self.redactor.redact_text(content, filename="hyprland.conf")
         self.assertTrue(res.is_modified)
         self.assertIn("<MONITOR_HARDWARE_DESCRIPTION>", res.redacted_content)
         self.assertNotIn("27GL850", res.redacted_content)
         self.assertIn("~/.config/hypr/scripts/launch.sh", res.redacted_content)
+        self.assertIn("$HOME/.config/waybar/toggle.sh", res.redacted_content)
+
+    def test_29_dotfile_redactor_waybar_jsonc_and_css(self) -> None:
+        """Verify Waybar config.jsonc and style.css home paths normalize to $HOME."""
+        script_path = "/home" + "/synthdev/.config/waybar/scripts/weather.sh"
+        bg_path = "/home" + "/synthdev/.config/waybar/assets/panel.png"
+        jsonc_content = (
+            "{\n"
+            '  "custom/weather": {\n'
+            f'    "exec": "{script_path}",\n'
+            '    "interval": 600\n'
+            "  }\n"
+            "}\n"
+        )
+        jsonc_res = self.redactor.redact_text(jsonc_content, filename="waybar/config.jsonc")
+        self.assertTrue(jsonc_res.is_modified)
+        self.assertNotIn(script_path, jsonc_res.redacted_content)
+        self.assertIn('"$HOME/.config/waybar/scripts/weather.sh"', jsonc_res.redacted_content)
+
+        css_content = f"window#waybar {{ background-image: url('{bg_path}'); }}\n"
+        css_res = self.redactor.redact_text(css_content, filename="waybar/style.css")
+        self.assertTrue(css_res.is_modified)
+        self.assertNotIn(bg_path, css_res.redacted_content)
+        self.assertIn("$HOME/.config/waybar/assets/panel.png", css_res.redacted_content)
+
+    def test_30_dotfile_redactor_waybar_weather_script(self) -> None:
+        """Verify Waybar custom weather scripts scrub API keys and coordinates."""
+        fake_owm_key = "9f86d081884c7d659a2feaa0c55ad015"
+        script = (
+            "#!/usr/bin/env bash\n"
+            f'WEATHER_API_KEY="{fake_owm_key}"\n'
+            'LAT="24.7136"\n'
+            'LON="46.6753"\n'
+            'CITY="Riyadh"\n'
+            f'curl -s "https://api.openweathermap.org/data/2.5/weather?lat=24.7136&lon=46.6753&appid={fake_owm_key}"\n'
+            'curl -s "https://wttr.in/24.71,46.67?format=3"\n'
+        )
+        res = self.redactor.redact_text(script, filename="waybar/scripts/weather.sh")
+        self.assertTrue(res.is_modified)
+        self.assertNotIn(fake_owm_key, res.redacted_content)
+        self.assertNotIn("24.7136", res.redacted_content)
+        self.assertNotIn("46.6753", res.redacted_content)
+        self.assertNotIn("Riyadh", res.redacted_content)
+        self.assertNotIn("24.71,46.67", res.redacted_content)
+        self.assertIn("<REDACTED_WEATHER_API_KEY>", res.redacted_content)
+        self.assertIn("<REDACTED_COORD>", res.redacted_content)
+        self.assertIn("<REDACTED_LOCATION>", res.redacted_content)
 
 
 class TestAuditAndSARIF(unittest.TestCase):
