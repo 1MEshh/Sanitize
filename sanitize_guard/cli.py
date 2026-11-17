@@ -236,9 +236,12 @@ def cmd_redact_dotfiles(args: argparse.Namespace) -> int:
         if p.is_file():
             targets.append(p)
         elif p.is_dir():
-            for root, _, files in os.walk(p):
+            for root, dirs, files in os.walk(p):
+                dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", "node_modules"}]
                 for f in files:
-                    targets.append(Path(root) / f)
+                    candidate = Path(root) / f
+                    if DotfileRedactor.is_supported_dotfile(candidate):
+                        targets.append(candidate)
 
     if not targets:
         print("No files specified for dotfile redaction.")

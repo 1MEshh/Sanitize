@@ -23,6 +23,36 @@ from sanitize_guard.pii_engine import (
 )
 
 
+SUPPORTED_DOTFILE_EXTENSIONS: tuple[str, ...] = (
+    ".conf",
+    ".jsonc",
+    ".rasi",
+    ".css",
+    ".json",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".env",
+    ".ini",
+    ".cfg",
+    ".toml",
+    ".yaml",
+    ".yml",
+)
+
+SUPPORTED_DOTFILE_NAMES: frozenset[str] = frozenset(
+    {
+        ".zshrc",
+        ".bashrc",
+        ".bash_profile",
+        ".zprofile",
+        ".gitconfig",
+        ".env",
+        "config",
+    }
+)
+
+
 @dataclass(frozen=True)
 class RedactionChange:
     """Details of a single redaction substitution applied to a file."""
@@ -106,6 +136,17 @@ class DotfileRedactor:
         self.default_git_name = default_git_name
         self.default_git_email = default_git_email
         self.pii_engine = PIIEngine()
+
+    @staticmethod
+    def is_supported_dotfile(path: str | Path) -> bool:
+        """Returns True when path is a supported dotfile or WM/bar config (.jsonc, .rasi, .conf, etc.)."""
+        p = Path(path)
+        name_lower = p.name.lower()
+        if name_lower.endswith(".template"):
+            return False
+        if name_lower in SUPPORTED_DOTFILE_NAMES or name_lower.startswith(".env"):
+            return True
+        return p.suffix.lower() in SUPPORTED_DOTFILE_EXTENSIONS
 
     def _scrub_weather_line(
         self, curr: str, line_idx: int, changes: list[RedactionChange]
