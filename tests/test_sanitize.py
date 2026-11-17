@@ -626,6 +626,56 @@ class TestDotfileRedactor(unittest.TestCase):
         self.assertIn("<REDACTED_COORD>", res.redacted_content)
         self.assertIn("<REDACTED_LOCATION>", res.redacted_content)
 
+    def test_31_jsonc_comment_preservation_during_redaction(self) -> None:
+        """Verify .jsonc single-line and block comments remain intact after redaction."""
+        exec_path = "/home" + "/synthdev/.config/waybar/scripts/net.sh"
+        jsonc_content = (
+            "// Top-level Waybar layout configuration\n"
+            "/* Keep multi-line block comments\n"
+            " * intact during dotfile template generation\n"
+            " */\n"
+            "{\n"
+            '  "layer": "top",\n'
+            '  "custom/net": {\n'
+            f'    "exec": "{exec_path}", // inline trailing comment\n'
+            '    "interval": 5\n'
+            "  }\n"
+            "}\n"
+        )
+        res = self.redactor.redact_text(jsonc_content, filename="config.jsonc")
+        self.assertTrue(res.is_modified)
+        self.assertIn("// Top-level Waybar layout configuration", res.redacted_content)
+        self.assertIn("/* Keep multi-line block comments", res.redacted_content)
+        self.assertIn(" * intact during dotfile template generation", res.redacted_content)
+        self.assertIn("// inline trailing comment", res.redacted_content)
+        self.assertIn('"$HOME/.config/waybar/scripts/net.sh"', res.redacted_content)
+        self.assertNotIn(exec_path, res.redacted_content)
+
+    def test_32_dotfile_extensions_scan_and_discovery(self) -> None:
+        """Verify .jsonc, .rasi, and .conf dotfiles are discovered and scanned."""
+        p_theme = "/home" + "/synthdev/.config/rofi/colors.rasi"
+        p_bar = "/home" + "/synthdev/.config/waybar/mediaplayer.py"
+        p_hypr = "/home" + "/synthdev/.config/hypr/env.conf"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "theme.rasi").write_text(f'@import "{p_theme}"\n', encoding="utf-8")
+            (root / "config.jsonc").write_text(f'{{"exec": "{p_bar}"}}\n', encoding="utf-8")
+            (root / "hyprland.conf").write_text(f"source = {p_hypr}\n", encoding="utf-8")
+            (root / "wallpaper.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            self.assertTrue(DotfileRedactor.is_supported_dotfile(root / "theme.rasi"))
+            self.assertTrue(DotfileRedactor.is_supported_dotfile(root / "config.jsonc"))
+            self.assertTrue(DotfileRedactor.is_supported_dotfile(root / "hyprland.conf"))
+            self.assertFalse(DotfileRedactor.is_supported_dotfile(root / "wallpaper.png"))
+
+            engine = PIIEngine(auto_detect_system=False)
+            findings = engine.scan_directory(root)
+            matched_files = {Path(f.file_path).name for f in findings}
+            self.assertIn("theme.rasi", matched_files)
+            self.assertIn("config.jsonc", matched_files)
+            self.assertIn("hyprland.conf", matched_files)
+
 
 class TestAuditAndSARIF(unittest.TestCase):
     """Tests for Git forensics, SARIF v2.1.0 schema generation, and zero-leak compliance."""
