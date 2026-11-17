@@ -234,9 +234,23 @@ sanitize redact-dotfiles ~/.zshrc ~/.gitconfig ~/.config/hypr/hyprland.conf .env
   - Masks personal GPG signing keys: `# signingkey = <YOUR_GPG_KEY_ID>`.
 - **Window Managers (`hyprland.conf`, `sway`, `i3`)**:
   - Masks monitor EDID hardware serial descriptors: `desc:<MONITOR_HARDWARE_DESCRIPTION>`.
-  - Sanitizes user autostart script paths: `exec-once = ~/.config/hypr/scripts/init.sh`.
+  - Sanitizes user autostart script paths (`exec-once = ~/.config/hypr/scripts/init.sh`) and normalizes bind/env paths to `$HOME/...`.
+- **Waybar & Rofi (`config.jsonc`, `style.css`, `.rasi`, custom scripts)**:
+  - Preserves `.jsonc` `//` and `/* ... */` comments while rewriting hardcoded `/home/<user>/...` paths to `$HOME/...`.
+  - Scrubs weather API keys (`appid=...`, `WEATHER_API_KEY`) and geographic coordinates (`lat`/`lon`, `wttr.in/...`) in custom bar scripts.
 - **Environment Files (`.env`, `.env.production`)**:
   - Rewrites database URIs: `postgres://app_user:<REDACTED_PASSWORD>@198.51.100.10:5432/app_db`.
+
+### Hyprland & Waybar Dotfile Publishing Checklist
+
+Before pushing rice configurations (`.config/hypr/`, `.config/waybar/`, `.config/rofi/`) to a public repository:
+
+1. **Normalize Home Paths**: Replace hardcoded `/home/<user>/...` references in `.conf`, `.jsonc`, `.rasi`, and `.css` files with `$HOME/...` or `~/...`.
+2. **Mask Monitor Hardware Descriptors**: Verify `monitor=desc:...` rules in `hyprland.conf` do not expose display serial numbers or EDID strings.
+3. **Scrub Custom Module Secrets**: Strip OpenWeatherMap / WeatherAPI keys, latitude/longitude coordinates, and city identifiers from Waybar weather scripts.
+4. **Preserve JSONC Comments**: Run `sanitize redact-dotfiles ~/.config/waybar/config.jsonc` so `//` and `/* ... */` comments stay intact in templates.
+5. **Scrub Rice Screenshots**: Run `sanitize scrub-media screenshots/ --inplace` to strip PNG/WebP EXIF and software metadata chunks before committing previews.
+6. **Run Pre-Push Audit**: Execute `sanitize audit . --fail-on medium` and `sanitize check-git --fail-on-leak`.
 
 ---
 
@@ -394,7 +408,7 @@ The repository enforces a strict zero-leak security gate executed via `scripts/s
 4. Zero active API credentials.
 5. Strict zero-emoji compliance.
 6. Git committer email privacy (`*@users.noreply.github.com`).
-7. 100% pass rate across the 28 automated unit tests.
+7. 100% pass rate across the 32 automated unit tests.
 8. Self-scan of `sanitize_guard` with 0 findings.
 
 ### Running Verification Locally
