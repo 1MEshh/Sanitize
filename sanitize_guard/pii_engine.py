@@ -45,6 +45,31 @@ class RuleID(str, Enum):
     API_TOKEN = "SAN-009"
 
 
+# Supported text and dotfile extensions for directory scanning
+SCANNABLE_TEXT_EXTENSIONS: tuple[str, ...] = (
+    ".py",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".conf",
+    ".cfg",
+    ".ini",
+    ".json",
+    ".jsonc",
+    ".rasi",
+    ".css",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".md",
+    ".txt",
+    ".env",
+    ".template",
+    ".xml",
+    ".svg",
+)
+
+
 @dataclass(frozen=True)
 class PIIFinding:
     """Represents an atomic detection of a privacy or credential leak."""
@@ -784,7 +809,7 @@ class PIIEngine:
                     continue
 
                 # Only scan text-like files
-                if f.endswith((".py", ".sh", ".bash", ".zsh", ".conf", ".cfg", ".ini", ".json", ".yaml", ".yml", ".toml", ".md", ".txt", ".env", ".template", ".xml", ".svg")):
+                if f.lower().endswith(SCANNABLE_TEXT_EXTENSIONS):
                     findings.extend(self.scan_file(filepath))
 
         return findings
